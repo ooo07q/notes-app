@@ -386,3 +386,14 @@ AI：
   5 tries. Stopped runs count toward the tokens. Without Jev, a local pattern decides.
 - Comparison on 18 openings: Jev caught 8 of 8 leaks (including Chinese self-talk); the local pattern caught 4 of 8.
   Neither flagged a good answer; Jev was unsure on 4 good ones (it then waits for the next sentence).
+- When Jev is unsure (2026-11-28, the user agreed that the answer so far goes to Jev at every sentence end): the same
+  Jev call also asks which sentence starts the real answer. The real leak seen in testing is a prefix (a garbled line,
+  then the plan in English, then the answer), so:
+  answer starts at sentence 1 → show it all; starts later → show from there, no retry;
+  Jev clear that the answer has begun and leaning "not a leak" → show from the sentence it ranks first;
+  all planning so far and Jev ≥ 0.8 → stop and ask again (cheap: caught in the first sentences);
+  still unsure when the answer is complete → Jev's lean decides (≥ 0.5 → ask again).
+  While held, the chat says 「Opus 在寫，Jev 正在確認開頭…」 instead of staying blank.
+- Test (real Jev, fake Claude at 40 characters a second): a normal answer Jev used to stay unsure about now shows at
+  1.7 s (was: only when finished, 14.9 s); clear answers 2.4 s; leaks never shown (asked again once, 4.5 s);
+  the "garbled + plan + answer" run shown from the answer.

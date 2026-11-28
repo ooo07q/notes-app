@@ -72,6 +72,7 @@ const LUMEN_EN = {
 " 刪除</button>": " Delete</button>",
 " 對的判斷做完之後，相關頁面又改過，判斷可能過時，先不列。下次檢查知識庫時會重新判斷。</div>": " pairs changed after they were judged, so the judgment may be stale; not listed. The next wiki check judges them again.</div>",
 " 年 ": "-",
+" 在寫，Jev 正在確認開頭…": " is writing; Jev is checking how it starts…",
 " 想一下…": " thinking…",
 " 日　星期": ", ",
 " 月": "",

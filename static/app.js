@@ -2110,7 +2110,7 @@ async function askAI(q) {
     let p;
     try { p = await api("/api/ai/poll?id=" + turn.id); } catch (e) { turn.status = "error"; turn.error = e.message; break; }
     const changed = p.text !== turn.text || p.status !== "running";
-    if (p.model !== turn.model || p.why !== turn.why || p.retried !== turn.retried) Object.assign(turn, { model: p.model, effort: p.effort, why: p.why, retried: p.retried }), renderAI();
+    if (p.model !== turn.model || p.why !== turn.why || p.retried !== turn.retried || !!p.held !== !!turn.held) Object.assign(turn, { model: p.model, effort: p.effort, why: p.why, retried: p.retried, held: p.held }), renderAI();
     turn.text = p.text; turn.seconds = p.seconds; turn.tokens = p.tokens; turn.quota = p.quota;
     if (p.status !== "running") { turn.status = p.status; turn.error = p.error; }
     if (changed) renderAI();
@@ -2225,7 +2225,7 @@ function turnHtml(t) {
   if (t.status === "finding") return h + T('<div class="ai-a muted"><span class="spin"></span> 找相關的頁…</div></div>');
   if (t.status === "asking") return h + T('<div class="ai-a muted"><span class="spin"></span> 交給 Claude…</div></div>');
   if (t.status === "writing" && !t.text) h += '<div class="ai-a muted"><span class="spin"></span> ' + (!t.model ? (t.choice === "auto" ? T("Jev 選模型…") : T("準備…")) :
-    esc(cap(t.model)) + (t.retried ? T(" 重新回答（第 ") + (t.retried + 1) + T(" 次）…") : T(" 想一下…"))) + "</div>";
+    esc(cap(t.model)) + (t.held ? T(" 在寫，Jev 正在確認開頭…") : t.retried ? T(" 重新回答（第 ") + (t.retried + 1) + T(" 次）…") : T(" 想一下…"))) + "</div>";
   h += '<div class="ai-a">' + (t.text ? md(t.text) : "") + (t.status === "writing" && t.text ? '<span class="ai-caret"></span>' : "");
   if (t.status === "error") h += T('<div class="banner">沒有回答：') + esc(TS(t.error || "")) +
     (/log ?in|login|auth|登入/i.test(t.error || "") ? T("。在終端機打 <code>claude</code> 登入後再試。") : "") + "</div>";

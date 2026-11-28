@@ -1710,23 +1710,72 @@ LEAK_Q = {"leak": {"type": "noul", "instructions":
     "instead of the answer itself?", "criteria": {
     "true": "It is planning, self-notes, instructions or markup, at least in part (e.g. 'Need Traditional Chinese "
             "answer. Cite page titles…', 'The user asks…', 'Let me check').",
-    "false": "It reads as the start of the answer, written for the user (headings, a bold summary, direct statements "
-             "and quotes from the notes are all fine)."}}}
+    "false": "It reads as the start of the answer, written to the user (headings, a bold summary, direct statements, "
+             "quotes from the notes, and telling the user what their notes do or don't cover, such as '你的筆記沒有"
+             "直接談這件事', are all fine)."}}}
 SENTENCE_END = re.compile(r"[。！？!?.\n]")
+SENTENCE = re.compile(r"[^。！？!?.\n]*(?:[。！？!?.]+|\n+|$)")
+START_MAX = 12                      # sentences Jev can point at as the start; a leak is always at the beginning
 
 
-def leak_check(job, text, msg):
-    """"leak", "ok" or "unsure" for the start of an answer. Jev judges it (about 0.3 s); without Jev, or when Jev
-    fails, the JUNK/LEAK patterns decide."""
+def sentences(text):
+    """[(offset, sentence)] for the text, in order, blank pieces skipped."""
+    out = []
+    for m in SENTENCE.finditer(text):
+        if m.group().strip():
+            out.append((m.start(), m.group()))
+    return out
+
+
+def start_q(parts):
+    """Jev choice: which numbered sentence is the first one written for the user ("none": not yet)."""
+    crit = {str(i + 1): "Sentence %d is the first one that is part of the answer for the user." % (i + 1)
+            for i in range(len(parts))}
+    crit["none"] = ("None of them: every sentence so far is the model talking to itself (planning such as 'Need "
+                    "Traditional Chinese answer', 'The user asks…', 'Let me check'), restated instructions, markup or "
+                    "garbled text.")
+    return {"type": "choice", "instructions":
+            "`sentences` are the numbered sentences a model has written so far in reply to `question`. A model "
+            "sometimes writes notes to itself or garbled text before the real answer. Which sentence is the first one "
+            "said to the user? Anything said to the user counts as answer: a heading, a summary, a fact, or telling "
+            "the user what their notes do or don't cover (e.g. '你的筆記沒有直接談這件事。').", "criteria": crit}
+
+
+def leak_check(job, text, msg, final=False):
+    """(verdict, cut) for the start of an answer: "leak", "ok" or "unsure"; cut = where the answer starts.
+    Jev gets two questions in one call (about 0.3 s, no Claude tokens): is this planning or markup, and which
+    sentence starts the real answer. So an opening Jev is unsure about is usually settled without waiting or asking
+    Claude again: "the answer starts at sentence 1" shows it all, "it starts at sentence 3" shows it from there.
+    Claude is asked again only when the text so far is all planning. final: the answer is complete, so an unsure
+    verdict is settled by which way Jev leans. Without Jev, or when Jev fails, the JUNK/LEAK patterns decide."""
     if job.get("jev") and not jev_paused():
         try:
             q = msg.rsplit("問題：", 1)[-1].strip()
-            a = jev.ask(json.dumps({"question": q, "answer_start": text}, ensure_ascii=False), LEAK_Q)
+            parts = sentences(text)[:START_MAX]
+            a = jev.ask(json.dumps({"question": q, "answer_start": text,
+                                    "sentences": ["%d. %s" % (i + 1, t.strip()) for i, (_, t) in enumerate(parts)]},
+                                   ensure_ascii=False), dict(LEAK_Q, start=start_q(parts)))
             p = jev.noul(a, "leak")
-            return "leak" if p >= jev.YES else "ok" if p <= jev.NO else "unsure"
+            c, cp = jev.choice(a, "start")
+            if c and c != "none":
+                cut = parts[int(c) - 1][0]
+                if cut == 0 and p >= jev.YES:          # "the answer starts at once" but "it is planning": not settled
+                    return ("leak" if final else "unsure"), 0
+                return "ok", cut
+            if p <= jev.NO:
+                return "ok", 0
+            if p >= jev.YES:
+                return "leak", 0
+            probs = {k: float(v) for k, v in a["start"]["probabilities"].items()}
+            if probs.get("none", 1) <= jev.NO and p < 0.5:  # clear that the answer has begun, leaning "not a leak"
+                best = max((k for k in probs if k != "none"), key=probs.get)
+                return "ok", parts[int(best) - 1][0]
+            if final:
+                return ("leak" if p >= 0.5 or c == "none" else "ok"), 0
+            return "unsure", 0
         except Exception:
             pass
-    return "leak" if bad_start(text, msg) else "ok"
+    return ("leak" if bad_start(text, msg) else "ok"), 0
 
 
 MODELS = ("haiku", "sonnet", "opus")
@@ -1820,23 +1869,21 @@ def run_once(job, msg, cwd):
     proc.stdin.write(msg)
     proc.stdin.close()
     started, buf = {}, [""]
-    chk = {"state": "open", "busy": False, "shown": False, "leak": False}   # open → clear (Jev ≤ 0.2) or leak (≥ 0.8)
+    # open → clear (shown from chk["cut"]) or leak (stopped). While open the text is held: job["held"] tells the app
+    chk = {"state": "open", "busy": False, "shown": False, "leak": False, "cut": 0}
 
     def check(text):
-        r = leak_check(job, text, msg)
+        r, cut = leak_check(job, text, msg)
         if r == "leak":
             chk["leak"], chk["state"] = True, "leak"
             try:
                 proc.kill()
             except OSError:
                 pass
-        else:
-            if r == "ok":
-                chk["state"] = "clear"
-            if r == "ok":                             # unsure (Jev between 0.2 and 0.8): check again at the next sentence
-                chk["shown"] = True
-                job["text"] = buf[0]
-        chk["busy"] = False
+        elif r == "ok":
+            chk["state"], chk["cut"], chk["shown"] = "clear", cut, True
+            job["text"], job["held"] = buf[0][cut:].lstrip(), False
+        chk["busy"] = False                              # unsure: check again at the next sentence
 
     for line in proc.stdout:
         try:
@@ -1852,7 +1899,9 @@ def run_once(job, msg, cwd):
                 t = delta.get("text", "")
                 buf[0] += t
                 if chk["shown"]:
-                    job["text"] = buf[0]
+                    job["text"] = buf[0][chk["cut"]:].lstrip()
+                elif buf[0].strip():
+                    job["held"] = True
                 if chk["state"] == "open" and not chk["busy"] and SENTENCE_END.search(t):
                     chk["busy"] = True
                     threading.Thread(target=check, args=(buf[0],), daemon=True).start()
@@ -1865,10 +1914,11 @@ def run_once(job, msg, cwd):
             elif d.get("result"):
                 buf[0] = d["result"]
                 if chk["shown"]:
-                    job["text"] = buf[0]
+                    job["text"] = buf[0][chk["cut"]:].lstrip()
     proc.wait(timeout=10)
     while chk["busy"]:                                # a verdict still on its way
         time.sleep(0.05)
+    job["held"] = False
     if chk["leak"]:
         # a stopped run sends no usage: count what it read, and roughly what it wrote
         claude_tokens(job, dict(started, output_tokens=len(buf[0]) // 2))
@@ -1877,12 +1927,14 @@ def run_once(job, msg, cwd):
     if proc.returncode and not job["error"] and not job["stopped"]:
         err = (proc.stderr.read() or "").strip()
         job["error"] = err[-400:] or "Claude Code 結束時出錯（代碼 %s）" % proc.returncode
-    if not job["stopped"] and not job["error"] and chk["state"] == "open" and not chk["shown"] and buf[0]:
-        if leak_check(job, buf[0], msg) == "leak":        # a short answer that never reached a verdict
+    if not job["stopped"] and not job["error"] and chk["state"] == "open" and buf[0]:
+        r, cut = leak_check(job, buf[0], msg, final=True)  # complete but never settled: Jev's lean decides
+        if r == "leak":
             job["text"] = ""
             return "junk"
+        chk["cut"] = cut
     if not job["error"]:
-        job["text"] = buf[0]
+        job["text"] = buf[0][chk["cut"]:].lstrip()
     return "ok"
 
 
@@ -2017,7 +2069,7 @@ def run_ai(job, msg):
         job["model"], job["effort"], job["why"] = route(job)
         tries = 0
         while not job["stopped"]:
-            job["text"], job["error"] = "", None
+            job["text"], job["error"], job["held"] = "", None, False
             r = run_once(job, msg, cwd)
             if r == "ok" or job["stopped"] or job["error"]:
                 break
@@ -2071,7 +2123,7 @@ def api_ai_poll(q):
     if not job:
         return 404, {"error": "沒有這個回答"}
     return 200, {"text": job["text"], "status": job["status"], "error": job["error"], "seconds": job.get("seconds"),
-                 "model": job["model"], "effort": job["effort"], "why": job["why"], "retried": job.get("retried", 0),
+                 "model": job["model"], "effort": job["effort"], "why": job["why"], "retried": job.get("retried", 0), "held": bool(job.get("held")),
                  "tokens": job.get("tokens"), "quota": job.get("quota")}
 
 
