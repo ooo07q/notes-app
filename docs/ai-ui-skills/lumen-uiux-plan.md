@@ -359,3 +359,30 @@ AI：
 ## 搜尋結果（2026-11-28，78bd555）
 
 搜尋框按 Enter 原本呼叫不存在的 `renderResults`，什麼都不顯示。現在結果列在左欄：先列知識庫的頁（Jev 依意思，沒有 Jev 就依關鍵字），再列內文含關鍵字的你的筆記和日記。筆記只在這台 Mac 上搜，不會交給 Jev 或 AI；索引在打開筆記庫時於背景建立（測試庫剛啟動約 10 秒，之後每次約 0.6 秒）。
+
+## Main screens prototype (2026-11-28, rounds 1–3, scratch copy only)
+
+- Round 1 (對話 / 大腦 / 隨寫): the user kept 對話 and 隨寫; 大腦 showed too much at once.
+- Round 2 (一個框 / 夥伴 / 低語): the user kept 一個框 and 夥伴.
+- Round 3 is one plan with three main screens, each can be the page Lumen opens on:
+  問答 (from 一個框), 筆記・日記・附件 (from 夥伴), 知識庫 (new: one page in focus, its neighbors around it).
+  The rail goes to them; 首頁 goes to the chosen start page.
+- Deviation from /prototype: the three picker items are three screens of one plan, not three rival directions,
+  because the user asked for one plan with three screens.
+- Three layers, labelled the same way everywhere:
+  1 「Lumen 認得」: on this Mac, at every pause (names, your past notes, question or note);
+  2 「Jev」: once per finished paragraph (pages by meaning; question or note when the rules can't tell);
+  3 「✦ Claude」: only when pressed, with an estimate of the tokens next to the button. The journal uses layer 1 only.
+- A small character (SVG + CSS, no library) on every screen: breathes, blinks, eyes follow the pointer, reacts at
+  random while you type, thinks (Jev), glows (Claude), smiles when done, closes its eyes in the journal, dozes after 45 s.
+  The user chose continuous motion on purpose ("every moment should feel the AI alive"); Reduce Motion keeps colour only.
+
+## Leaked Opus answers (server.py)
+
+- Test 2026-11-28 (8 real Opus runs): forcing thinking through Claude Code settings is not possible on Opus 5.5;
+  asking for it in the instructions made things worse; the old rule (no thinking block first → stop) killed good answers.
+- Now: Jev reads the start of each answer at every sentence end until it is sure (about 0.3 s a check). The text is held
+  back until Jev says it is an answer; a leak stops the run at once and it is asked again with the same model, at most
+  5 tries. Stopped runs count toward the tokens. Without Jev, a local pattern decides.
+- Comparison on 18 openings: Jev caught 8 of 8 leaks (including Chinese self-talk); the local pattern caught 4 of 8.
+  Neither flagged a good answer; Jev was unsure on 4 good ones (it then waits for the next sentence).

@@ -1690,6 +1690,43 @@ def ai_prompt(body):
 # A last check on the answer: stray markup instead of an answer (seen with Opus: "<budget:…>",
 # "<reasoning_effort>…", "<thinking_mode>…") means it is asked again.
 JUNK = re.compile(r"^\s*</?[a-z]+_[a-z_]+>|<(budget:|reasoning_effort>|thinking_mode>)")
+# Opus sometimes writes its plan in English instead of answering ("Need Traditional Chinese answer. Cite page
+# titles…"). Jev judges the start of every answer (see leak_check); this pattern is the fallback when Jev is off.
+LEAK = re.compile(r"(?:^|[。．.!?！？\n]\s*)(?:Need|Let me|The user|I need|I should|I'll|I will|I must|Okay|OK,|So the|Cite|Must|"
+                  r"Should|Answer in|Now,? (?:I|let)|Looking at|We need|Plan:)\b")
+CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+
+
+def bad_start(text, msg):
+    """Stray markup, or the model's own planning, at the start of an answer."""
+    head = text[:400]
+    q = msg.rsplit("問題：", 1)[-1]
+    return bool(JUNK.search(head[:300]) or (CJK.search(q) and LEAK.search(head[:200])))
+
+
+LEAK_Q = {"leak": {"type": "noul", "instructions":
+    "`answer_start` is the first part of a reply a model is writing to `question` for the user. Is it the model's own "
+    "planning, notes to itself, restated instructions, or stray markup (such as <budget:…> or <thinking_mode>) "
+    "instead of the answer itself?", "criteria": {
+    "true": "It is planning, self-notes, instructions or markup, at least in part (e.g. 'Need Traditional Chinese "
+            "answer. Cite page titles…', 'The user asks…', 'Let me check').",
+    "false": "It reads as the start of the answer, written for the user (headings, a bold summary, direct statements "
+             "and quotes from the notes are all fine)."}}}
+SENTENCE_END = re.compile(r"[。！？!?.\n]")
+
+
+def leak_check(job, text, msg):
+    """"leak", "ok" or "unsure" for the start of an answer. Jev judges it (about 0.3 s); without Jev, or when Jev
+    fails, the JUNK/LEAK patterns decide."""
+    if job.get("jev") and not jev_paused():
+        try:
+            q = msg.rsplit("問題：", 1)[-1].strip()
+            a = jev.ask(json.dumps({"question": q[:1000], "answer_start": text[:1500]}, ensure_ascii=False), LEAK_Q)
+            p = jev.noul(a, "leak")
+            return "leak" if p >= jev.YES else "ok" if p <= jev.NO else "unsure"
+        except Exception:
+            pass
+    return "leak" if bad_start(text, msg) else "ok"
 
 
 MODELS = ("haiku", "sonnet", "opus")
@@ -1767,8 +1804,11 @@ def route(job):
 
 
 def run_once(job, msg, cwd):
-    """One Claude Code run. Returns "retry" when Opus started answering without thinking first: in that case
-    (about half the time here) its reasoning or bits of Claude Code's own instructions leak into the answer."""
+    """One Claude Code run. Returns "retry" when the answer starts with stray markup or the model's own planning
+    (seen with Opus when it skips thinking). Jev checks the answer at each sentence end until it is sure; the text
+    is held back until Jev is sure it is an answer, and the run is stopped the moment Jev calls it a leak, so a bad run costs
+    little and never shows. Answering without a thinking block is not a sign on its own: most of those answers are
+    fine (2026-11-28 test)."""
     import subprocess
     cmd = [job["bin"], "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
            "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence",
@@ -1778,7 +1818,27 @@ def run_once(job, msg, cwd):
     job["proc"] = proc
     proc.stdin.write(msg)
     proc.stdin.close()
-    thought = False
+    started, buf = {}, [""]
+    chk = {"state": "open", "busy": False, "shown": False, "leak": False, "unsure": 0}   # open → clear or leak
+
+    def check(text):
+        r = leak_check(job, text, msg)
+        if r == "leak":
+            chk["leak"], chk["state"] = True, "leak"
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        else:
+            if r == "ok":
+                chk["state"] = "clear"
+            else:                                     # unsure: check again at the next sentence
+                chk["unsure"] += 1
+            if r == "ok" or chk["unsure"] >= 3:       # Jev stays unsure: show it rather than keep you waiting
+                chk["shown"] = True
+                job["text"] = buf[0]
+        chk["busy"] = False
+
     for line in proc.stdout:
         try:
             d = json.loads(line)
@@ -1787,16 +1847,16 @@ def run_once(job, msg, cwd):
         if d.get("type") == "stream_event":
             ev = d.get("event") or {}
             delta = ev.get("delta") or {}
-            if ev.get("type") == "content_block_start":
-                kind = (ev.get("content_block") or {}).get("type")
-                if kind == "thinking":
-                    thought = True
-                elif kind == "text" and job["model"] == "opus" and not thought:
-                    proc.kill()
-                    proc.wait()
-                    return "retry"
+            if ev.get("type") == "message_start":
+                started = (ev.get("message") or {}).get("usage") or {}
             if ev.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
-                job["text"] += delta.get("text", "")
+                t = delta.get("text", "")
+                buf[0] += t
+                if chk["shown"]:
+                    job["text"] = buf[0]
+                if chk["state"] == "open" and not chk["busy"] and SENTENCE_END.search(t):
+                    chk["busy"] = True
+                    threading.Thread(target=check, args=(buf[0],), daemon=True).start()
         elif d.get("type") == "rate_limit_event":
             quota_from_claude(job, d)
         elif d.get("type") == "result":
@@ -1804,12 +1864,27 @@ def run_once(job, msg, cwd):
             if d.get("is_error"):
                 job["error"] = str(d.get("result") or d.get("subtype") or "Claude Code 回報錯誤")
             elif d.get("result"):
-                job["text"] = d["result"]
+                buf[0] = d["result"]
+                if chk["shown"]:
+                    job["text"] = buf[0]
     proc.wait(timeout=10)
+    while chk["busy"]:                                # a verdict still on its way
+        time.sleep(0.05)
+    if chk["leak"]:
+        # a stopped run sends no usage: count what it read, and roughly what it wrote
+        claude_tokens(job, dict(started, output_tokens=len(buf[0]) // 2))
+        job["text"] = ""
+        return "retry"
     if proc.returncode and not job["error"] and not job["stopped"]:
         err = (proc.stderr.read() or "").strip()
         job["error"] = err[-400:] or "Claude Code 結束時出錯（代碼 %s）" % proc.returncode
-    return "junk" if not job["stopped"] and not job["error"] and JUNK.search(job["text"][:300]) else "ok"
+    if not job["stopped"] and not job["error"] and chk["state"] == "open" and not chk["shown"] and buf[0]:
+        if leak_check(job, buf[0], msg) == "leak":        # a short answer that never reached a verdict
+            job["text"] = ""
+            return "junk"
+    if not job["error"]:
+        job["text"] = buf[0]
+    return "ok"
 
 
 def note_quota(job, window, pct):
@@ -1928,6 +2003,9 @@ def run_chatgpt(job, msg):
         raise RuntimeError("ChatGPT 的回答中斷了，請再問一次。")
 
 
+RETRY_MAX = 5                       # a ceiling so a bad streak can't keep using your quota
+
+
 def run_ai(job, msg):
     cwd = os.path.join(APP, "agent")              # an empty folder: no CLAUDE.md, no project settings
     os.makedirs(cwd, exist_ok=True)
@@ -1946,12 +2024,9 @@ def run_ai(job, msg):
                 break
             tries += 1
             job["retried"] = tries
-            if tries >= 3 or (r == "junk" and tries >= 2):
-                if job["model"] == "sonnet":
-                    job["text"], job["error"] = "", "Claude 沒有給出正常的回答，請再問一次。"
-                    break
-                job["why"] += "；%s 連續 %d 次回答不正常，改用 Sonnet" % (job["model"].capitalize(), tries)
-                job["model"], tries = "sonnet", 0
+            if tries >= RETRY_MAX:          # the model stays the one Jev (or you) chose; a bad run is stopped early
+                job["text"], job["error"] = "", "Claude 沒有給出正常的回答，請再問一次。"
+                break
     except StopIteration:
         pass
     except Exception as e:                        # not installed, not logged in, killed…
