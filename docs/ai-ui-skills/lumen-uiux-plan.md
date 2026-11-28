@@ -381,8 +381,8 @@ AI：
 
 - Test 2026-11-28 (8 real Opus runs): forcing thinking through Claude Code settings is not possible on Opus 5.5;
   asking for it in the instructions made things worse; the old rule (no thinking block first → stop) killed good answers.
-- Now: Jev reads the start of each answer at every sentence end until it is sure (about 0.3 s a check). The text is held
-  back until Jev says it is an answer; a leak stops the run at once and it is asked again with the same model, at most
+- Now: Jev reads the whole answer so far at every sentence end until it is sure (≥ 0.8 leak, ≤ 0.2 answer; no length
+  limit, at the user's request; about 0.3 s a check). The text is held back until Jev says it is an answer; a leak stops the run at once and it is asked again with the same model, at most
   5 tries. Stopped runs count toward the tokens. Without Jev, a local pattern decides.
 - Comparison on 18 openings: Jev caught 8 of 8 leaks (including Chinese self-talk); the local pattern caught 4 of 8.
   Neither flagged a good answer; Jev was unsure on 4 good ones (it then waits for the next sentence).

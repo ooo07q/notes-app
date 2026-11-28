@@ -1721,7 +1721,7 @@ def leak_check(job, text, msg):
     if job.get("jev") and not jev_paused():
         try:
             q = msg.rsplit("問題：", 1)[-1].strip()
-            a = jev.ask(json.dumps({"question": q[:1000], "answer_start": text[:1500]}, ensure_ascii=False), LEAK_Q)
+            a = jev.ask(json.dumps({"question": q, "answer_start": text}, ensure_ascii=False), LEAK_Q)
             p = jev.noul(a, "leak")
             return "leak" if p >= jev.YES else "ok" if p <= jev.NO else "unsure"
         except Exception:
@@ -1805,7 +1805,8 @@ def route(job):
 
 def run_once(job, msg, cwd):
     """One Claude Code run. Returns "retry" when the answer starts with stray markup or the model's own planning
-    (seen with Opus when it skips thinking). Jev checks the answer at each sentence end until it is sure; the text
+    (seen with Opus when it skips thinking). Jev checks the whole answer so far at each sentence end until it is sure
+    (no length limit: only Jev's confidence decides); the text
     is held back until Jev is sure it is an answer, and the run is stopped the moment Jev calls it a leak, so a bad run costs
     little and never shows. Answering without a thinking block is not a sign on its own: most of those answers are
     fine (2026-11-28 test)."""
@@ -1819,7 +1820,7 @@ def run_once(job, msg, cwd):
     proc.stdin.write(msg)
     proc.stdin.close()
     started, buf = {}, [""]
-    chk = {"state": "open", "busy": False, "shown": False, "leak": False, "unsure": 0}   # open → clear or leak
+    chk = {"state": "open", "busy": False, "shown": False, "leak": False}   # open → clear (Jev ≤ 0.2) or leak (≥ 0.8)
 
     def check(text):
         r = leak_check(job, text, msg)
@@ -1832,9 +1833,7 @@ def run_once(job, msg, cwd):
         else:
             if r == "ok":
                 chk["state"] = "clear"
-            else:                                     # unsure: check again at the next sentence
-                chk["unsure"] += 1
-            if r == "ok" or chk["unsure"] >= 3:       # Jev stays unsure: show it rather than keep you waiting
+            if r == "ok":                             # unsure (Jev between 0.2 and 0.8): check again at the next sentence
                 chk["shown"] = True
                 job["text"] = buf[0]
         chk["busy"] = False
